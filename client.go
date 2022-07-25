@@ -17,7 +17,7 @@ import (
 const (
 	deprecatedSuffix = "/features"
 	clientName       = "unleash-client-go"
-	clientVersion    = "3.6.0"
+	clientVersion    = "3.7.0"
 )
 
 var defaultStrategies = []strategy.Strategy{
@@ -238,19 +238,19 @@ func (uc *Client) sync() {
 // IsEnabled queries whether the specified feature is enabled or not.
 //
 // It is safe to call this method from multiple goroutines concurrently.
-func (uc *Client) IsEnabled(feature string, options ...FeatureOption) (enabled bool) {
+func (uc *Client) IsEnabled(featureName string, options ...FeatureOption) (enabled bool) {
 	defer func() {
-		uc.metrics.count(feature, enabled)
+		uc.metrics.count(featureName, enabled)
 	}()
-
-	return uc.isEnabled(feature, options...)
+	feature := uc.repository.getToggle(featureName)
+	return uc.isEnabled(featureName, feature, options...)
 }
 
 // isEnabled abstracts away the details of checking if a toggle is turned on or off
+// featureName is used as a backup in case the provided feature is nil
 // without metrics
-func (uc *Client) isEnabled(feature string, options ...FeatureOption) (enabled bool) {
-	f := uc.repository.getToggle(feature)
-
+// without retrieval of api.Feature
+func (uc *Client) isEnabled(featureName string, feature *api.Feature, options ...FeatureOption) (enabled bool) {
 	var opts featureOption
 	for _, o := range options {
 		o(&opts)
@@ -261,24 +261,24 @@ func (uc *Client) isEnabled(feature string, options ...FeatureOption) (enabled b
 		ctx = ctx.Override(*opts.ctx)
 	}
 
-	if f == nil {
+	if feature == nil {
 		if opts.fallbackFunc != nil {
-			return opts.fallbackFunc(feature, ctx)
+			return opts.fallbackFunc(featureName, ctx)
 		} else if opts.fallback != nil {
 			return *opts.fallback
 		}
 		return false
 	}
 
-	if !f.Enabled {
+	if !feature.Enabled {
 		return false
 	}
 
-	if len(f.Strategies) == 0 {
-		return f.Enabled
+	if len(feature.Strategies) == 0 {
+		return feature.Enabled
 	}
 
-	for _, s := range f.Strategies {
+	for _, s := range feature.Strategies {
 		foundStrategy := uc.getStrategy(s.Name)
 		if foundStrategy == nil {
 			// TODO: warnOnce missingStrategy
@@ -306,10 +306,27 @@ func (uc *Client) isEnabled(feature string, options ...FeatureOption) (enabled b
 	return false
 }
 
+// IsFeatureEnabled queries whether the specified feature is enabled or not.
+// If feature is nil then the Feature.Name will be treated as the empty string ""
+//
+// It is safe to call this method from multiple goroutines concurrently.
+func (uc *Client) IsFeatureEnabled(feature *api.Feature, options ...FeatureOption) (enabled bool) {
+	defer func() {
+		if feature == nil {
+			uc.metrics.count("", enabled)
+		} else {
+			uc.metrics.count(feature.Name, enabled)
+		}
+
+	}()
+
+	return uc.isEnabled("", feature, options...)
+}
+
 // GetVariant queries a variant as the specified feature is enabled.
 //
 // It is safe to call this method from multiple goroutines concurrently.
-func (uc *Client) GetVariant(feature string, options ...VariantOption) *api.Variant {
+func (uc *Client) GetVariant(featureName string, options ...VariantOption) *api.Variant {
 	defaultVariant := api.GetDefaultVariant()
 	var opts variantOption
 	for _, o := range options {
@@ -321,15 +338,15 @@ func (uc *Client) GetVariant(feature string, options ...VariantOption) *api.Vari
 		ctx = ctx.Override(*opts.ctx)
 	}
 
-	if !uc.isEnabled(feature, WithContext(*ctx)) {
+	f := uc.repository.getToggle(featureName)
+
+	if !uc.isEnabled(featureName, f, WithContext(*ctx)) {
 		return defaultVariant
 	}
 
-	f := uc.repository.getToggle(feature)
-
 	if f == nil {
 		if opts.variantFallbackFunc != nil {
-			return opts.variantFallbackFunc(feature, ctx)
+			return opts.variantFallbackFunc(featureName, ctx)
 		} else if opts.variantFallback != nil {
 			return opts.variantFallback
 		}
@@ -347,7 +364,7 @@ func (uc *Client) GetVariant(feature string, options ...VariantOption) *api.Vari
 	variant := f.GetVariant(ctx)
 
 	defer func() {
-		uc.metrics.countVariants(feature, variant.Name)
+		uc.metrics.countVariants(featureName, variant.Name)
 	}()
 	return variant
 }
